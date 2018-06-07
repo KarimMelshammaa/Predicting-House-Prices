@@ -1,0 +1,426 @@
+---
+title: "Featuring Engineering Assignment 1"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 3
+author: Karim El-Shamma & Carla Rajeh
+
+# Kaggle usernames:
+# carlaraj
+# Karim El-Shammaa
+
+# Each of our rankings is based on the test dataset that was created from the original assignment solution file which has an RMSE of 0.13344.
+# The RMSE of this code here in Kaggle was 0.19.
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(plyr)
+library(dplyr)
+library(moments)
+library(glmnet)
+library(caret)
+library(rJava)
+library(FSelector)
+library(dummies)
+```
+
+```{r Load Data}
+training_data = read.csv("train.csv")
+test_data = read.csv("test.csv")
+```
+
+```{r Check for duplicates}
+length(unique(training_data$Id)) == nrow(training_data)
+```
+
+There is no duplicates so we remove the Id column
+```{r Remove the ID Column}
+training_data = training_data[ , -which(names(training_data) %in% c("Id"))]
+
+```
+
+
+# Data Preparation
+
+```{r}
+
+# We start by calculating the correlations between the different variables within the dataset
+
+correlations = cor(training_data[,sapply(training_data,is.numeric) | sapply(df,is.integer)], use = "complete.obs")
+
+# Filtering by values that are above 0.5
+
+for (c in 1:ncol(correlations)){
+  for (r in 1:nrow(correlations)){
+  if(abs(correlations[r,c]) < 0.5){
+    correlations[r,c] = NA
+  }
+  }
+}
+
+
+# We shall drop the following features as they have a weak relationship with the Sale Price:
+# Street, Alley, LotShape, LandContour, Utilities, LotConfig, LandSlope, Condition1, Condition2, BldgType, HouseStyle, RoofStyle, RoofMatl, ExterCond, BsmtCond, BsmtExposure, BsmtFin1, BsmtFin2, BsmUnSf, Heating, Electrical, LowQualfinSF, BsmtHalfBath, Functional, ScreenPorch, PoolArea, PoolQC, Fence, MiscFeature, MiscVal, MoSold, YrSold, Sale Type, SaleCondition
+
+
+training_data = as.data.frame(training_data[ , -which(names(training_data) %in% c("Street", "Alley", "LotShape", "LandContour", "Utilities", "LotConfig", "LandSlope", "Condition1", "Condition2", "BldgType", "HouseStyle", "RoofStyle", "RoofMatl", "ExterCond", "BsmtCond", "BsmtExposure", "BsmtFinType1", "BsmtFinType2", "BsmtUnfSF", "Heating", "Electrical", "LowQualFinSF", "BsmtHalfBath", "Functional", "ScreenPorch", "PoolArea", "PoolQC", "Fence", "MiscFeature", "MiscVal", "MoSold", "YrSold", "SaleType", "SaleCondition"))])
+
+
+test_data = as.data.frame(test_data[ , -which(names(test_data) %in% c("Street", "Alley", "LotShape", "LandContour", "Utilities", "LotConfig", "LandSlope", "Condition1", "Condition2", "BldgType", "HouseStyle", "RoofStyle", "RoofMatl", "ExterCond", "BsmtCond", "BsmtExposure", "BsmtFinType1", "BsmtFinType2", "BsmtUnfSF", "Heating", "Electrical", "LowQualFinSF", "BsmtHalfBath", "Functional", "ScreenPorch", "PoolArea", "PoolQC", "Fence", "MiscFeature", "MiscVal", "MoSold", "YrSold", "SaleType", "SaleCondition"))])
+
+
+# GarageYrBuilt and Year Built have an 0.8 correlation, so we remove GarageYrBuilt to reduce noise
+# TotalBsmtSf and 1stFloorSF have an 0.8 correlation, so we remove 1stFloorSf to reduce noise
+# GnrlLivArea and TltlRoomsAG have an 0.8 correlation, so we remove TltRoomsAg to reduce noise
+# GarageAreaSF and GarageCars have an 0.8 correlation, so we remove GarageCars to reduce noise
+
+training_data = as.data.frame(training_data[ , -which(names(training_data) %in% c("GarageYrBlt", "X1stFlrSF", "TotRmsAbvGrd", "GarageCars"))])
+
+test_data = as.data.frame(test_data[ , -which(names(test_data) %in% c("GarageYrBlt", "X1stFlrSF", "TotRmsAbvGrd", "GarageCars"))])
+
+
+
+# Adding dummy variables for ExterQual and KitchenQual columns
+training_data = dummy.data.frame(data = training_data, names="ExterQual")
+training_data = dummy.data.frame(data = training_data, names="KitchenQual")
+
+test_data = dummy.data.frame(data = test_data, names="ExterQual")
+test_data = dummy.data.frame(data = test_data, names="KitchenQual")
+
+
+
+# Binning Neighborhood according to price
+Neighborhood_rank = training_data %>%
+  mutate(Neighb_rank = ifelse(Neighborhood == "IDOTRR" | Neighborhood == "MeadowV" | Neighborhood == "BrDale" | Neighborhood == "BrkSide" | Neighborhood == "OldTown" | Neighborhood == "Edwards" | Neighborhood == "Sawyer" | Neighborhood == "Blueste", "cheap",
+                              ifelse(Neighborhood == "SWISU" | Neighborhood == "NPkVill" | Neighborhood == "NAmes" | Neighborhood == "Mitchel" | Neighborhood == "SawyerW" | Neighborhood == "NWAmes" | Neighborhood == "Gilbert" | Neighborhood == "CollgCr" | Neighborhood == "Blmngtn", "medium", 
+                              ifelse(Neighborhood == "Crawfor" | Neighborhood == "ClearCr" | Neighborhood == "Somerst" |Neighborhood == "Veenker" | Neighborhood == "Timber" | Neighborhood == "StoneBr" | Neighborhood == "NridgHt" | Neighborhood == "NoRidge", "expensive", 0)))) %>%
+  select(Neighb_rank)
+
+Neighborhood_rank = factor(Neighborhood_rank$Neighb_rank)
+training_data = as.data.frame(cbind(training_data, Neighborhood_rank))
+
+
+
+Neighborhood_rank = test_data %>%
+  mutate(Neighb_rank = ifelse(Neighborhood == "IDOTRR" | Neighborhood == "MeadowV" | Neighborhood == "BrDale" | Neighborhood == "BrkSide" | Neighborhood == "OldTown" | Neighborhood == "Edwards" | Neighborhood == "Sawyer" | Neighborhood == "Blueste", "cheap",
+                              ifelse(Neighborhood == "SWISU" | Neighborhood == "NPkVill" | Neighborhood == "NAmes" | Neighborhood == "Mitchel" | Neighborhood == "SawyerW" | Neighborhood == "NWAmes" | Neighborhood == "Gilbert" | Neighborhood == "CollgCr" | Neighborhood == "Blmngtn", "medium", 
+                              ifelse(Neighborhood == "Crawfor" | Neighborhood == "ClearCr" | Neighborhood == "Somerst" |Neighborhood == "Veenker" | Neighborhood == "Timber" | Neighborhood == "StoneBr" | Neighborhood == "NridgHt" | Neighborhood == "NoRidge", "expensive", 0)))) %>%
+  select(Neighb_rank)
+
+Neighborhood_rank = factor(Neighborhood_rank$Neighb_rank)
+test_data = as.data.frame(cbind(test_data, Neighborhood_rank))
+
+# Create a new feature by mulitplying OverallQual and GrLivArea
+training_data$Qual_Area = training_data$OverallQual * training_data$GrLivArea
+
+test_data$Qual_Area = test_data$OverallQual * test_data$GrLivArea
+
+# Adding the Sale Price to the last column
+aux = training_data %>%
+  select(SalePrice)
+training_data = training_data %>%
+  select(-SalePrice)
+training_data = as.data.frame(cbind(training_data, SalePrice = aux$SalePrice))
+
+```
+
+
+## Hunting NAs
+
+
+Counting columns with null values
+```{r NAs discovery}
+na.cols <- which(colSums(is.na(training_data)) > 0)
+sort(colSums(sapply(training_data[na.cols], is.na)), decreasing = TRUE)
+paste('There are', length(na.cols), 'columns with missing values')
+```
+
+
+NA imputation:
+```{r Train NA Imputation}
+
+training_data$BedroomAbvGr[is.na(training_data$BedroomAbvGr)] <- 0
+
+# Bsmt : NA for basement features is "no basement"
+training_data$BsmtQual = factor(training_data$BsmtQual, levels=c(levels(training_data$BsmtQual), "No"))
+training_data$BsmtQual[is.na(training_data$BsmtQual)] = "No"
+
+# FireplaceQu : NA means "no fireplace"
+training_data$FireplaceQu = factor(training_data$FireplaceQu, levels=c(levels(training_data$FireplaceQu), "No"))
+training_data$FireplaceQu[is.na(training_data$FireplaceQu)] = "No"
+
+# Garage : NA for garage features is "no garage"
+training_data$GarageType = factor(training_data$GarageType, levels=c(levels(training_data$GarageType), "No"))
+training_data$GarageType[is.na(training_data$GarageType)] = "No"
+
+training_data$GarageFinish = factor(training_data$GarageFinish, levels=c(levels(training_data$GarageFinish), "No"))
+training_data$GarageFinish[is.na(training_data$GarageFinish)] = "No"
+
+training_data$GarageQual = factor(training_data$GarageQual, levels=c(levels(training_data$GarageQual), "No"))
+training_data$GarageQual[is.na(training_data$GarageQual)] = "No"
+
+training_data$GarageCond = factor(training_data$GarageCond, levels=c(levels(training_data$GarageCond), "No"))
+training_data$GarageCond[is.na(training_data$GarageCond)] = "No"
+
+# LotFrontage : NA most likely means no lot frontage
+training_data$LotFrontage[is.na(training_data$LotFrontage)] <- 0
+
+# MasVnrType : NA most likely means no veneer
+training_data$MasVnrType[is.na(training_data$MasVnrType)] = "None"
+training_data$MasVnrArea[is.na(training_data$MasVnrArea)] <- 0
+
+na.cols <- which(colSums(is.na(training_data)) > 0)
+paste('There are now', length(na.cols), 'columns with missing values')
+```
+
+We repeat the process for test_data
+```{r Test Inputation}
+test_data$BedroomAbvGr[is.na(test_data$BedroomAbvGr)] <- 0
+
+# BsmtQual etc : data description says NA for basement features is "no basement"
+test_data$BsmtQual = factor(test_data$BsmtQual, levels=c(levels(test_data$BsmtQual), "No"))
+test_data$BsmtQual[is.na(test_data$BsmtQual)] = "No"
+
+# FireplaceQu : data description says NA means "no fireplace"
+test_data$FireplaceQu = factor(test_data$FireplaceQu, levels=c(levels(test_data$FireplaceQu), "No"))
+test_data$FireplaceQu[is.na(test_data$FireplaceQu)] = "No"
+
+# GarageType etc : data description says NA for garage features is "no garage"
+test_data$GarageType = factor(test_data$GarageType, levels=c(levels(test_data$GarageType), "No"))
+test_data$GarageType[is.na(test_data$GarageType)] = "No"
+
+test_data$GarageFinish = factor(test_data$GarageFinish, levels=c(levels(test_data$GarageFinish), "No"))
+test_data$GarageFinish[is.na(test_data$GarageFinish)] = "No"
+
+test_data$GarageQual = factor(test_data$GarageQual, levels=c(levels(test_data$GarageQual), "No"))
+test_data$GarageQual[is.na(test_data$GarageQual)] = "No"
+
+
+# LotFrontage : NA most likely means no lot frontage
+test_data$LotFrontage[is.na(test_data$LotFrontage)] <- 0
+
+# MasVnrType : NA most likely means no veneer
+test_data$MasVnrType[is.na(test_data$MasVnrType)] = "None"
+test_data$MasVnrArea[is.na(test_data$MasVnrArea)] <- 0
+
+```
+
+
+## Factorize features
+
+```{r Factorize features}
+
+training_data$MSSubClass <- as.factor(training_data$MSSubClass)
+
+test_data$MSSubClass <- as.factor(test_data$MSSubClass)
+
+```
+
+
+## Skewness
+
+```{r}
+# get data frame of SalePrice and log(SalePrice + 1) for plotting
+df <- rbind(data.frame(version="log(price+1)",x=log(training_data$SalePrice + 1)),
+            data.frame(version="price",x=training_data$SalePrice))
+
+ggplot(data=df) +
+  facet_wrap(~version,ncol=2,scales="free_x") +
+  geom_histogram(aes(x=x), bins = 50)
+```
+
+
+
+We therefore transform the target value applying log.
+```{r Log transform the target for official scoring}
+# Log transform the target for official scoring
+training_data$SalePrice <- log1p(training_data$SalePrice)
+```
+
+
+For numeric feature with excessive skewness, perform log transformation
+```{r}
+
+column_types <- sapply(names(training_data),function(x){class(training_data[[x]])})
+numeric_columns <-names(column_types[column_types != "factor"])
+
+# skew of each variable
+skew <- sapply(numeric_columns,function(x){skewness(training_data[[x]],na.rm = T)})
+
+# transform all variables above a threshold skewness.
+skew <- skew[skew > 0.75]
+for(x in names(skew)) {
+  training_data[[x]] <- log(training_data[[x]] + 1)
+}
+```
+
+The same for the test data
+```{r}
+column_types <- sapply(names(test_data),function(x){class(test_data[[x]])})
+numeric_columns <-names(column_types[column_types != "factor"])
+
+skew <- sapply(numeric_columns,function(x){skewness(test_data[[x]],na.rm = T)})
+skew <- skew[skew > 0.75]
+for(x in names(skew)) {
+  test_data[[x]] <- log(test_data[[x]] + 1)
+}
+```
+
+## Train, Validation Spliting
+
+```{r Train test split}
+# I found this function, that is worth to save for future ocasions.
+splitdf <- function(dataframe, seed=NULL) {
+  if (!is.null(seed)) set.seed(seed)
+ 	index <- 1:nrow(dataframe)
+ 	trainindex <- sample(index, trunc(length(index)/1.5))
+ 	trainset <- dataframe[trainindex, ]
+ 	testset <- dataframe[-trainindex, ]
+ 	list(trainset=trainset,testset=testset)
+}
+splits <- splitdf(training_data, seed=1)
+training <- splits$trainset
+validation <- splits$testset
+```
+
+
+# Feature Engineering
+
+### Information Gain Selection
+
+```{r}
+weights<- data.frame(information.gain(SalePrice~., training_data))
+weights$feature <- rownames(weights)
+weights[order(weights$attr_importance, decreasing = TRUE),]
+information_gain_features <- weights$feature[weights$attr_importance >= 0.05]
+```
+
+#### Evaluation
+Evaluate the impact of the IG selection in the model performance
+```{r Information Gain Regression Model, message=FALSE, warning=FALSE}
+set.seed(121)
+train_control_config <- trainControl(method = "repeatedcv", 
+                       number = 5, 
+                       repeats = 1,
+                       returnResamp = "all")
+
+
+ig.lm.mod <- train(SalePrice ~ ., data = training[append(information_gain_features, "SalePrice")], 
+               method = "lm", 
+               metric = "RMSE",
+               preProc = c("center", "scale"),
+               trControl=train_control_config)
+
+for (x in names(validation)) {
+  ig.lm.mod$xlevels[[x]] <- union(ig.lm.mod$xlevels[[x]], levels(validation[[x]]))
+}
+ig.lm.mod.pred <- predict(ig.lm.mod, validation[,-ncol(validation)])
+ig.lm.mod.pred[is.na(ig.lm.mod.pred)] <- 0
+
+my_data=as.data.frame(cbind(predicted=ig.lm.mod.pred,observed=validation$SalePrice))
+
+ggplot(my_data,aes(predicted,observed))+
+  geom_point() + geom_smooth(method = "lm") +
+  labs(x="Predicted") +
+  ggtitle('Linear Model')
+
+paste("IG Filtered Linear Regression RMSE = ", sqrt(mean((ig.lm.mod.pred - validation$SalePrice)^2)))
+```
+
+
+
+Based on these results, we filter the training and validation set with the Information Gain features.
+```{r}
+training <- training[append(information_gain_features, "SalePrice")]
+validation <- validation[append(information_gain_features, "SalePrice")]
+```
+
+
+
+## Embedded
+
+### Lasso Regresion
+
+
+#### Evaluation
+Plot the RMSE for the different lambda values and Explain the results.
+```{r}
+lambdas <- 10^seq(-3, 3, by = .1)
+
+lasso.cv_fit <- cv.glmnet(x = data.matrix(training[,-ncol(training)]), y=training$SalePrice, alpha = 1, lambda = lambdas)
+plot(lasso.cv_fit)
+
+```
+
+
+<b>Interpretation:</b>
+As said in class, In contrast to Ridge Regression, Lasso Regression performs feature selection (it is forcing the coefficients to be 0), as you can see in the top numbers in the plot.
+
+
+Select the best lambda form the CV model, use it to predict the target value of the validation set and evaluate the results (in terms of RMSE)
+```{r}
+bestlam <- lasso.cv_fit$lambda.min
+paste("Best Lambda value from CV=", bestlam)
+lasso.mod <- glmnet(x = data.matrix(training[,-ncol(training)]), y=training$SalePrice, alpha = 1, lambda = lambdas)
+lasso.pred=predict(lasso.mod, s=bestlam, data.matrix(validation[,-ncol(validation)]))
+paste("RMSE for lambda ", bestlam, " = ", sqrt(mean((lasso.pred - validation$SalePrice)^2)))
+```
+
+Select the ??1se value from the CV model to predict on the validation set
+```{r}
+lam1se <- lasso.cv_fit$lambda.1se
+paste("Lambda 1se value from CV=", lam1se)
+lasso.mod <- glmnet(x = data.matrix(training[,-ncol(training)]), y=training$SalePrice, alpha = 1, lambda = lambdas)
+lasso.pred=predict(lasso.mod, s=lam1se, data.matrix(validation[,-ncol(validation)]))
+paste("RMSE for lambda ", lam1se, " = ", sqrt(mean((lasso.pred - validation$SalePrice)^2)))
+```
+
+Predictions against the actual values 
+```{r}
+# Plot important coefficients
+my_data=as.data.frame(cbind(predicted=lasso.pred,observed=validation$SalePrice))
+
+ggplot(my_data,aes(my_data["1"],observed))+
+  geom_point()+geom_smooth(method="lm")+
+  scale_x_continuous(expand = c(0,0)) +
+  labs(x="Predicted") +
+  ggtitle('Lasso')
+```
+
+Variable importance
+```{r}
+# Print, plot variable importance
+imp <- varImp(lasso.mod, lambda = bestlam)
+names <- rownames(imp)[order(imp$Overall, decreasing=TRUE)]
+importance <- imp[names,]
+
+data.frame(row.names = names, importance)
+
+```
+
+Variables selected by the lasso model (only those with importance larger than 0)
+```{r}
+filtered_names <- rownames(imp)[order(imp$Overall, decreasing=TRUE)][1:28]
+print(filtered_names)
+```
+
+
+# Prediction on the test data
+
+```{r}
+
+log_prediction <- predict(lasso.cv_fit,  s=lasso.cv_fit$lambda.min, newx = data.matrix(test_data[information_gain_features]))
+actual_pred <- exp(log_prediction)-1
+hist(actual_pred)
+submit <- data.frame(Id=test_data$Id,SalePrice=actual_pred)
+colnames(submit) <-c("Id", "SalePrice")
+
+submit$SalePrice[is.na(submit$SalePrice)] <- 0
+replace_value_for_na <- sum(na.omit(submit$SalePrice))/(nrow(submit) - sum(submit$SalePrice == 0))
+submit$SalePrice[submit$SalePrice == 0] <- replace_value_for_na
+
+write.csv(submit,file="predictions.csv",row.names=F)
+```
